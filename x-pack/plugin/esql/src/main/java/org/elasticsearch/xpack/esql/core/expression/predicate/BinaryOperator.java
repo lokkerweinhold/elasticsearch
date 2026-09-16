@@ -6,12 +6,14 @@
  */
 package org.elasticsearch.xpack.esql.core.expression.predicate;
 
+import org.elasticsearch.xpack.esql.core.expression.Attribute;
 import org.elasticsearch.xpack.esql.core.expression.Expression;
-import org.elasticsearch.xpack.esql.core.expression.StableHashable;
+import org.elasticsearch.xpack.esql.core.expression.Literal;
 import org.elasticsearch.xpack.esql.core.expression.TypeResolutions.ParamOrdinal;
 import org.elasticsearch.xpack.esql.core.tree.Source;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
@@ -23,9 +25,7 @@ import static org.elasticsearch.xpack.esql.core.expression.TypeResolutions.Param
  * Operator is a specialized binary predicate where both sides have the compatible types
  * (it's up to the analyzer to do any conversion if needed).
  */
-public abstract class BinaryOperator<T, U, R, F extends PredicateBiFunction<T, U, R>> extends BinaryPredicate<T, U, R, F>
-    implements
-        StableHashable {
+public abstract class BinaryOperator<T, U, R, F extends PredicateBiFunction<T, U, R>> extends BinaryPredicate<T, U, R, F> {
 
     protected BinaryOperator(Source source, Expression left, Expression right, F function) {
         super(source, left, right, function);
@@ -53,19 +53,6 @@ public abstract class BinaryOperator<T, U, R, F extends PredicateBiFunction<T, U
     }
 
     @Override
-    public int stableHash() {
-        int leftHash = StableHashable.compute(left());
-        int rightHash = StableHashable.compute(right());
-        if (isCommutative()) {
-            // Order-independent: sort the two child hashes so Add(a,b) and Add(b,a) yield the same value.
-            int lo = Math.min(leftHash, rightHash);
-            int hi = Math.max(leftHash, rightHash);
-            return Objects.hash(getClass().getName(), lo, hi);
-        }
-        return Objects.hash(getClass().getName(), leftHash, rightHash);
-    }
-
-    @Override
     protected Expression canonicalize() {
         // fast check
         if (isCommutative() == false) {
@@ -79,7 +66,7 @@ public abstract class BinaryOperator<T, U, R, F extends PredicateBiFunction<T, U
         List<Expression> commutativeChildren = new ArrayList<>(2);
         collectCommutative(commutativeChildren, this);
         // sort
-        commutativeChildren.sort((l, r) -> Integer.compare(StableHashable.compute(l), StableHashable.compute(r)));
+        commutativeChildren.sort((l, r) -> Integer.compare(stableKey(l), stableKey(r)));
 
         // reduce all children using the current operator - this method creates a balanced tree
         while (commutativeChildren.size() > 1) {
@@ -100,6 +87,25 @@ public abstract class BinaryOperator<T, U, R, F extends PredicateBiFunction<T, U
             last = replaceChildren(last, iterator.next());
         }
         return last;
+    }
+
+    /**
+     * Returns a stable sort key for {@code e} that does not depend on runtime-assigned {@link
+     * org.elasticsearch.xpack.esql.core.expression.NameId}s, so commutative children are always
+     * sorted into the same canonical order regardless of JVM run.
+     */
+    private static int stableKey(Expression e) {
+        if (e instanceof Attribute a) {
+            return Objects.hash(a.dataType(), a.name(), a.qualifier(), a.nullable(), a.synthetic());
+        }
+        if (e instanceof Literal l) {
+            return l.hashCode(); // Literal.hashCode() is based on value + type, always stable
+        }
+        List<Expression> children = e.children();
+        if (children.isEmpty() == false) {
+            return Objects.hash(e.getClass().getName(), Arrays.hashCode(children.stream().mapToInt(BinaryOperator::stableKey).toArray()));
+        }
+        return e.semanticHash(); // safe fallback for unknown leaf types
     }
 
     protected void collectCommutative(List<Expression> commutative, Expression expression) {
